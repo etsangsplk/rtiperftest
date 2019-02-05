@@ -1178,6 +1178,91 @@ public:
 
 /******************************************************************************/
 
+// template <typename T>
+class RTIFlatDataPublisher: public RTIPublisherBase<TestDataFlat_t> {
+
+protected:
+    int _last_message_size;
+
+public:
+    typedef TestDataFlat_t T;
+    typedef typename rti::flat::flat_type_traits<T>::builder Builder;
+
+    RTIFlatDataPublisher(
+            dds::pub::DataWriter<T> writer,
+            int num_instances,
+            rti::core::Semaphore& pongSemaphore,
+            bool useSemaphore,
+            int instancesToBeWritten,
+            const dds::core::xtypes::StructType& typeCode)
+          :
+            RTIPublisherBase<T>(
+                    writer,
+                    num_instances,
+                    pongSemaphore,
+                    useSemaphore,
+                    instancesToBeWritten),
+            _last_message_size(0)
+    {
+        for (unsigned long i = 0; i < this->_num_instances; ++i) {
+            Builder builder = rti::flat::build_data(writer);
+            add_key(builder, i);
+            T *sample = builder.finish_sample();
+
+            this->_instance_handles.push_back(
+                    this->_writer.register_instance(*sample));
+            
+            // TODO: confirm whether register_instance returns the loan or not
+            // (ask Harish)
+            this->_writer.extensions().discard_loan(*sample);
+        }
+        
+        // TODO: Register the key of MAX_CFT_VALUE
+    }
+
+    bool send(TestMessage &message, bool isCftWildCardKey) 
+    {
+        Builder builder = rti::flat::build_data(this->_writer);
+
+        long key = 0;
+        if (!isCftWildCardKey) {
+            if (this->_num_instances > 1) {
+                if (this->_instancesToBeWritten == -1) {
+                    key = this->_instance_counter++ % this->_num_instances;
+                } else { // send sample to a specific subscriber
+                    key = this->_instancesToBeWritten;
+                }
+            }
+        } else {
+            key = MAX_CFT_VALUE;
+        }
+
+        add_key(builder, key);
+        builder.add_entity_id(message.entity_id);
+        
+        // Add the payload
+        rti::flat::PrimitiveSequenceBuilder<unsigned char> bin_data_builder = 
+                builder.build_bin_data();
+        bin_data_builder.add_n(message.size);
+        bin_data_builder.finish();
+
+        // TODO: add/build the rest of the members
+
+        return builder.finish_sample();
+    }
+
+private:
+    void add_key(Builder& builder, unsigned long i)
+    {
+        auto key_offset = builder.add_key();
+        for (int c = 0; c < KEY_SIZE; c++) {
+            key_offset.set_element(c, (unsigned char) (i >> c * 8));
+        }
+    }
+};
+
+/******************************************************************************/
+
 /* ReceiverListener */
 
 template<typename T>
@@ -1222,6 +1307,35 @@ public:
         }
     }
 };
+
+template<typename T>
+class FlatDataReceiverListener: public ReceiverListenerBase<T> {
+
+public:
+    FlatDataReceiverListener(IMessagingCB *callback) :
+        ReceiverListenerBase<T>(callback) {
+    }
+
+    void on_data_available(dds::sub::DataReader<T> &reader) {
+
+        this->samples = reader.take();
+
+        for (unsigned int i = 0; i < this->samples.length(); ++i) {
+            if (this->samples[i].info().valid()) {
+                const T& sample = this->samples[i].data();
+                this->_message.entity_id = sample.root().entity_id();
+                // this->_message.seq_num = sample.seq_num();
+                // this->_message.timestamp_sec = sample.timestamp_sec();
+                // this->_message.timestamp_usec = sample.timestamp_usec();
+                // this->_message.latency_ping = sample.latency_ping();
+                this->_message.size = (int) sample.root().bin_data().element_count();
+                // //this->_message.data = sample.bin_data();
+                this->_callback->ProcessMessage(this->_message);
+            }
+        }
+    }
+};
+
 
 class DynamicDataReceiverListener: public ReceiverListenerBase<DynamicData> {
 
